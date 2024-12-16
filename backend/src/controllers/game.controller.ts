@@ -7,28 +7,28 @@ export class GameController {
   constructor(private readonly gameService: GameService) {}
 
   @Post()
-  createGame(@Body() createGameDto: CreateGameDto) {
-    return this.gameService.createGame(createGameDto);
+  async createGame(@Body() createGameDto: CreateGameDto) {
+    return await this.gameService.createGame(createGameDto);
   }
 
   @Get(':id')
-  getGame(@Param('id') id: string) {
-    return this.gameService.getGame(id);
+  async getGame(@Param('id') id: string) {
+    return await this.gameService.getGame(id);
   }
 
   @Put(':id/join')
-  joinGame(
+  async joinGame(
     @Param('id') id: string,
     @Body() joinGameDto: JoinGameDto,
   ) {
-    return this.gameService.joinGame(id, joinGameDto);
+    return await this.gameService.joinGame(id, joinGameDto);
   }
 
   @Post(':id/draw')
-  drawName(
+  async drawName(
     @Param('id') id: string,
     @Body('name') name: string,
   ) {
-    return this.gameService.drawName(id, name);
+    return await this.gameService.drawName(id, name);
   }
 }

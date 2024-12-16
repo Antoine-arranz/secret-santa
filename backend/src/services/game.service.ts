@@ -1,12 +1,18 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { Game, Participant, Couple, CreateGameDto, JoinGameDto } from '../models/game.model';
+import { Party } from '../entities/party.entity';
 import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
 export class GameService {
-  private games: Map<string, Game> = new Map();
+  constructor(
+    @InjectRepository(Party)
+    private partyRepository: Repository<Party>
+  ) {}
 
-  createGame(createGameDto: CreateGameDto): Game {
+  async createGame(createGameDto: CreateGameDto): Promise<Game> {
     const { adminName, participants, couples } = createGameDto;
 
     // Vérifier que tous les participants des couples sont dans la liste des participants
@@ -16,8 +22,16 @@ export class GameService {
       }
     }
 
+    const party = new Party();
+    party.name = adminName;
+    party.participants = participants;
+    party.assignments = {};
+    party.date = new Date();
+
+    const savedParty = await this.partyRepository.save(party);
+
     const game: Game = {
-      id: uuidv4(),
+      id: savedParty.id,
       adminName,
       participants: participants.map(name => ({
         name,
@@ -28,76 +42,78 @@ export class GameService {
       draws: new Map()
     };
 
-    this.games.set(game.id, game);
     return game;
   }
 
-  getGame(gameId: string): Game {
-    const game = this.games.get(gameId);
-    if (!game) {
+  async getGame(gameId: string): Promise<Game> {
+    const party = await this.partyRepository.findOne({ where: { id: gameId } });
+    if (!party) {
       throw new NotFoundException('Partie non trouvée');
     }
+
+    // Convertir les données de la base en format Game
+    const game: Game = {
+      id: party.id,
+      adminName: party.name,
+      participants: party.participants.map(name => ({
+        name,
+        hasJoined: true,
+        hasDrawn: !!party.assignments[name]
+      })),
+      couples: [], // À implémenter si nécessaire
+      draws: new Map(Object.entries(party.assignments || {}))
+    };
+
     return game;
   }
 
-  joinGame(gameId: string, joinGameDto: JoinGameDto): Participant {
-    const game = this.getGame(gameId);
-    const participant = game.participants.find(p => p.name === joinGameDto.name);
-    
-    if (!participant) {
-      throw new BadRequestException('Participant non trouvé dans cette partie');
+  async joinGame(gameId: string, joinGameDto: JoinGameDto): Promise<Game> {
+    const party = await this.partyRepository.findOne({ where: { id: gameId } });
+    if (!party) {
+      throw new NotFoundException('Partie non trouvée');
     }
 
-    if (participant.hasJoined) {
-      throw new BadRequestException('Participant déjà connecté');
+    if (!party.participants.includes(joinGameDto.name)) {
+      throw new BadRequestException('Ce participant n\'est pas dans la liste');
     }
 
-    participant.hasJoined = true;
-    return participant;
+    return this.getGame(gameId);
   }
 
-  drawName(gameId: string, participantName: string): string {
-    const game = this.getGame(gameId);
-    const participant = game.participants.find(p => p.name === participantName);
-
-    if (!participant) {
-      throw new BadRequestException('Participant non trouvé');
+  async drawName(gameId: string, participantName: string): Promise<string> {
+    const party = await this.partyRepository.findOne({ where: { id: gameId } });
+    if (!party) {
+      throw new NotFoundException('Partie non trouvée');
     }
 
-    if (!participant.hasJoined) {
-      throw new BadRequestException('Vous devez d\'abord rejoindre la partie');
+    if (!party.participants.includes(participantName)) {
+      throw new BadRequestException('Ce participant n\'est pas dans la liste');
     }
 
-    if (participant.hasDrawn) {
-      throw new BadRequestException('Vous avez déjà tiré un nom');
+    if (party.assignments && party.assignments[participantName]) {
+      return party.assignments[participantName];
     }
 
-    const availableParticipants = game.participants.filter(p => {
-      // Ne peut pas se tirer soi-même
-      if (p.name === participantName) return false;
-      
-      // Ne peut pas tirer quelqu'un qui a déjà été tiré
-      if ([...game.draws.values()].includes(p.name)) return false;
-      
-      // Ne peut pas tirer son/sa partenaire
-      const isCouple = game.couples.some(
-        couple => 
-          (couple.person1 === participantName && couple.person2 === p.name) ||
-          (couple.person2 === participantName && couple.person1 === p.name)
-      );
-      return !isCouple;
-    });
+    // Liste des participants disponibles (non tirés)
+    const assignedNames = Object.values(party.assignments || {});
+    const availableParticipants = party.participants.filter(
+      p => p !== participantName && !assignedNames.includes(p)
+    );
 
     if (availableParticipants.length === 0) {
-      throw new BadRequestException('Aucun participant disponible pour le tirage');
+      throw new BadRequestException('Plus de participants disponibles');
     }
 
-    const randomIndex = Math.floor(Math.random() * availableParticipants.length);
-    const drawnParticipant = availableParticipants[randomIndex];
+    // Tirage aléatoire
+    const drawnName = availableParticipants[Math.floor(Math.random() * availableParticipants.length)];
     
-    game.draws.set(participantName, drawnParticipant.name);
-    participant.hasDrawn = true;
+    // Mise à jour des assignments
+    party.assignments = {
+      ...party.assignments,
+      [participantName]: drawnName
+    };
 
-    return drawnParticipant.name;
+    await this.partyRepository.save(party);
+    return drawnName;
   }
 }
