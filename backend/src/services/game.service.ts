@@ -26,23 +26,17 @@ export class GameService {
     party.name = adminName;
     party.participants = participants;
     party.assignments = {};
+    party.couples = couples;
     party.date = new Date();
+    party.participantStatus = participants.map(name => ({
+      name,
+      hasJoined: false,
+      hasDrawn: false
+    }));
 
     const savedParty = await this.partyRepository.save(party);
 
-    const game: Game = {
-      id: savedParty.id,
-      adminName,
-      participants: participants.map(name => ({
-        name,
-        hasJoined: false,
-        hasDrawn: false
-      })),
-      couples,
-      draws: new Map()
-    };
-
-    return game;
+    return this.partyToGame(savedParty);
   }
 
   async getGame(gameId: string): Promise<Game> {
@@ -51,20 +45,7 @@ export class GameService {
       throw new NotFoundException('Partie non trouvée');
     }
 
-    // Convertir les données de la base en format Game
-    const game: Game = {
-      id: party.id,
-      adminName: party.name,
-      participants: party.participants.map(name => ({
-        name,
-        hasJoined: true,
-        hasDrawn: !!party.assignments[name]
-      })),
-      couples: [], // À implémenter si nécessaire
-      draws: new Map(Object.entries(party.assignments || {}))
-    };
-
-    return game;
+    return this.partyToGame(party);
   }
 
   async joinGame(gameId: string, joinGameDto: JoinGameDto): Promise<Game> {
@@ -73,11 +54,19 @@ export class GameService {
       throw new NotFoundException('Partie non trouvée');
     }
 
-    if (!party.participants.includes(joinGameDto.name)) {
+    const participantStatus = party.participantStatus.find(p => p.name === joinGameDto.name);
+    if (!participantStatus) {
       throw new BadRequestException('Ce participant n\'est pas dans la liste');
     }
 
-    return this.getGame(gameId);
+    if (participantStatus.hasJoined) {
+      throw new BadRequestException('Ce participant a déjà rejoint la partie');
+    }
+
+    participantStatus.hasJoined = true;
+    await this.partyRepository.save(party);
+
+    return this.partyToGame(party);
   }
 
   async drawName(gameId: string, participantName: string): Promise<string> {
@@ -86,19 +75,39 @@ export class GameService {
       throw new NotFoundException('Partie non trouvée');
     }
 
-    if (!party.participants.includes(participantName)) {
+    const participantStatus = party.participantStatus.find(p => p.name === participantName);
+    if (!participantStatus) {
       throw new BadRequestException('Ce participant n\'est pas dans la liste');
     }
 
-    if (party.assignments && party.assignments[participantName]) {
-      return party.assignments[participantName];
+    if (!participantStatus.hasJoined) {
+      throw new BadRequestException('Vous devez d\'abord rejoindre la partie');
+    }
+
+    if (participantStatus.hasDrawn) {
+      if (party.assignments[participantName]) {
+        return party.assignments[participantName];
+      }
+      throw new BadRequestException('Vous avez déjà tiré un nom');
     }
 
     // Liste des participants disponibles (non tirés)
     const assignedNames = Object.values(party.assignments || {});
-    const availableParticipants = party.participants.filter(
-      p => p !== participantName && !assignedNames.includes(p)
-    );
+    const availableParticipants = party.participants.filter(p => {
+      // Ne peut pas se tirer soi-même
+      if (p === participantName) return false;
+      
+      // Ne peut pas tirer quelqu'un qui a déjà été tiré
+      if (assignedNames.includes(p)) return false;
+      
+      // Ne peut pas tirer son/sa partenaire
+      const isCouple = party.couples.some(
+        couple => 
+          (couple.person1 === participantName && couple.person2 === p) ||
+          (couple.person2 === participantName && couple.person1 === p)
+      );
+      return !isCouple;
+    });
 
     if (availableParticipants.length === 0) {
       throw new BadRequestException('Plus de participants disponibles');
@@ -107,13 +116,28 @@ export class GameService {
     // Tirage aléatoire
     const drawnName = availableParticipants[Math.floor(Math.random() * availableParticipants.length)];
     
-    // Mise à jour des assignments
+    // Mise à jour des assignments et du statut
     party.assignments = {
       ...party.assignments,
       [participantName]: drawnName
     };
+    participantStatus.hasDrawn = true;
 
     await this.partyRepository.save(party);
     return drawnName;
+  }
+
+  private partyToGame(party: Party): Game {
+    return {
+      id: party.id,
+      adminName: party.name,
+      participants: party.participantStatus.map(p => ({
+        name: p.name,
+        hasJoined: p.hasJoined,
+        hasDrawn: p.hasDrawn
+      })),
+      couples: party.couples || [],
+      draws: new Map(Object.entries(party.assignments || {}))
+    };
   }
 }
